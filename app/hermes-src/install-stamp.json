@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "commit": "d923a5eb487a",
+  "commitDate": 1792043576,
+  "branch": null,
+  "builtAt": "2026-10-17T09:40:38.651318+00:00",
+  "dirty": false,
+  "source": "build",
+  "distribution": null,
+  "updateMechanism": "external",
+  "baseVersion": "0.22.2",
+  "displayVersion": "0.22.2",
+  "distance": 0,
+  "payload": "bootstrap",
+  "tag": null
+}

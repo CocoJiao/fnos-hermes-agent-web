@@ -1,1 +1,0 @@
-import{c as e}from"./layout-DaM-pyMo.js";import{s as t}from"./preview-DYGjZ1gW.js";var n=new Map;function r(e,t){return n.set(e,t),()=>{n.get(e)===t&&n.delete(e)}}function i(){let r=t.get(),i=r.find(t=>t.id===e.get())??r[0];return i&&n.get(i.id)||null}export{r as n,i as t};
