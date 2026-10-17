@@ -12,6 +12,7 @@
 
 - [这是什么](#这是什么)
 - [功能一览](#功能一览)
+- [与官方版本的差异](#与官方版本的差异)
 - [系统要求](#系统要求)
 - [安装](#安装)
 - [访问入口与端口](#访问入口与端口)
@@ -40,7 +41,7 @@
 | **本项目** | 把它做成 fnOS 应用包：`install_callback` 负责部署源码与依赖、`monitor.js` 负责进程管理与 Web 入口、`web-shim.js` 负责把 Electron 桥接替换成浏览器实现、`fpk/` 是应用中心骨架 |
 | **关系** | `app/hermes-src/` 是**上游源码的 vendored 副本**（可运行、已打定制补丁）；上游更新通过受控合并叠加，不是简单覆盖 |
 
-与上游的差异只在少数几个文件（见[上游同步机制](#上游同步机制)），核心 Python 代码尽量保持原样，以便跟进官方更新。
+**代码层面**的改动集中在少数几个文件，核心 Python 业务代码尽量保持原样，以便跟进官方更新；但**形态层面**（安装、界面、进程、依赖、数据目录）差异不小，完整清单见[与官方版本的差异](#与官方版本的差异)，同步流程见[上游同步机制](#上游同步机制)。
 
 ## 功能一览
 
@@ -53,6 +54,111 @@
 - **两套界面**：桌面端 Web UI（主界面）+ 官方 dashboard（模型 / 网关 / 插件等设置面板）
 - **自检与修复**：`POST /api/app/repair` 一键重启网关与 dashboard
 - **版本与更新**：应用内可查当前构建版本与上游 commit；官方更新检查需配置 `GITHUB_REPO` 环境变量，未配置时接口返回 409（属正常提示）
+
+## 与官方版本的差异
+
+一句话：**上游的 Python 运行时核心基本原样保留，差异全在外面的"壳"**——发行方式、界面接入、进程模型、依赖供给、数据位置，外加一批面向中文/飞牛场景的增量功能。
+
+先看总览：
+
+| 维度 | 官方 Hermes Agent | 本项目（fnOS 版） |
+|---|---|---|
+| 发行形态 | 桌面端 monorepo：Electron App + CLI/TUI + Web dashboard | fnOS 应用包（FPK），浏览器使用，无桌面窗口 |
+| 安装方式 | 自行 clone 仓库 / 跑 `setup-hermes.sh` / 自己管 Python 与 uv | 应用中心一键安装，自动装 `nodejs_v24`，包内自带 uv |
+| 使用入口 | 桌面 App、`hermes` TUI、dashboard 各自启动 | 统一 HTTP 入口 `8650`，dashboard 由 `/proxy/dashboard` 内嵌 |
+| 进程模型 | 用户前台启动，关终端即退出 | `monitor.js` 常驻守护 gateway / dashboard / embed-server |
+| 数据目录 | `~/.hermes` | `@apphome/hermes-agent/data`（`HERMES_HOME` 指过去） |
+| Python | 自备（`[all]` 依赖实际要求 3.14） | uv 托管 CPython 3.14，装到 `@apphome/uv-python` |
+| 版本号 | 三段，如 `0.22.2` | 四段，如 `0.22.2.3`（第四段是构建号） |
+| 升级 | `git pull` / 重新安装 | 应用中心覆盖安装，或应用内自动更新 |
+| 语言 | 英文为主（含 `locales`） | 中文汉化层 + 中文厂商预设 |
+| 发布方 | Nous Research 官方 | 第三方移植包（manifest `source = thirdparty`） |
+
+### 1. 发行与安装
+
+- **官方是桌面端 monorepo**：`apps/desktop`（Electron）、`web`（dashboard）、`native`、`website`、`docs`、`tests`、`evals` 等。本项目只 vendor **运行时核心**，桌面端只取**前端构建产物**（见[上游同步机制](#上游同步机制)）。
+- **依赖自动装**：`manifest` 里 `install_dep_apps = nodejs_v24`，安装时由应用中心把 Node 24 装到 `/var/apps/nodejs_v24`；找不到时 `install_callback` 会兜底下载 Node v22 LTS。官方要自己准备 Node（主要用于构建前端）。
+- **Python 不用你管**：包内自带 `uv`（`fpk/bin/uv`，约 47 MB），首次安装由 uv 下载 CPython 3.14 并建 venv；官方要求自己装 Python 3.14 + uv。若检测到内置 `venv-bundle.tar.gz`，解压即用、跳过在线安装。
+- **安装向导 / 卸载向导**：`fpk/wizard/install` 只做说明；`fpk/wizard/uninstall` 让你选「保留数据」或「完全删除」（官方无向导概念）。
+- **权限模型跟着 fnOS 走**：`fpk/config/privilege` 声明 `run-as: package`、用户 `hermes-agent`；安装后把应用目录/数据目录/日志目录统一 `chown` 到实际用户，避免 root 与 `hermes-agent` 混跑出 EACCES。
+- **额外授权**：安装时写一条 sudoers，允许 `hermes-agent` 免密执行 `cp` / `chown` / `psql -d appcenter`——用于应用内更新覆盖文件、修权限、同步应用中心版本号。官方完全没有这一层。
+
+### 2. 界面与访问
+
+- **官方桌面端是 Electron**：渲染进程跑在 `file://`，通过 IPC 调 `window.hermesDesktop.*`（选文件、剪贴板、连接信息等）。本项目把它**Web 化**：`app/desktop-app/` = 官方 `apps/desktop` 的 renderer 构建产物 + 本项目 `index.html` / `web-shim.js`。
+- **`web-shim.js` 是浏览器版桥接层**：用 Proxy 实现官方前端期待的全部 `hermesDesktop` 能力，并提供**242 条中英映射的汉化层**（MutationObserver + 500 ms 兜底）、移动端适配（iOS 输入框 16 px 防聚焦缩放、`safe-area-inset` 刘海屏）。
+- **`index.html` 由脚本生成**：`scripts/desktop-inject-index.js` 注入三点——`viewport-fit=cover` + `interactive-widget=resizes-content`、`window.__HERMES_WEB_CONFIG__`（走代理 + session token）、`web-shim.js` 引用。
+- **dashboard 被反向代理**：官方 dashboard 是本地开发面板（默认 `9119`），本项目由 `monitor.js` 代理到 `/proxy/dashboard/*` → `127.0.0.1:9219`，注入 session token，并把 WebSocket 的 `Host` / `Origin` 改写成 loopback（否则 dashboard 的 loopback 守卫会对局域网访问返回 403）。
+- **端口主动迁走**：官方网关 `8642`、dashboard `9119`；本项目改为 **`8742` / `9219`**，规避同机 hermes-studio 之类应用对 `8642` 的抢占（跨用户进程本包杀不掉）。
+- **绑定策略**：`8650` 绑 `0.0.0.0`（局域网可访问）；`9219` 只绑 `127.0.0.1`，`8742` 仅用于本机 monitor ↔ gateway 通信；另有一个 unix socket + `BASE_PATH=/app/hermes-agent` 供应用中心门户走。
+- **两套界面并存**：桌面端 Web UI（主界面，走 8650）+ 官方 dashboard（模型/网关/插件设置）。官方需要自己分别打开，本项目收进同一入口。
+
+### 3. 进程与运行
+
+- **`monitor.js` 是唯一的常驻 Node 进程**（由 `fpk/cmd/main` 以 `hermes-agent` 用户拉起），负责启动/守护两个 Python 子进程：`hermes gateway`（8742，Agent 运行时）与 `hermes dashboard`（9219，官方面板），另有本地嵌入服务 `memory-core/embed-server.mjs`（8410，OpenAI 兼容 `/v1/embeddings`）。
+- **官方没有守护层**：进程随终端退出，崩了要自己重启。本项目有健康检查（8742 用 `/proc` 的 LISTEN 判据，比 HTTP 探活可靠）、崩溃重启、`--replace` 兜底接管、PID 文件与 socket 校验。
+- **启动前的自愈**：`main start` 会把 `@appdata` / `@apphome` 的属主拉回应用目录属主，清掉残留 socket；socket 被外部清理（如应用中心重置安装目录）后还能自动重建。
+- **安装前的清场**：`install_init` 会先 `pkill` 残留的 monitor/gateway/dashboard、等进程真正退出、删 socket、检查 8650/8742/9219 端口占用（只杀 hermes 相关进程，避免误杀）、清掉 `@appdata` 里的旧 `app_version` 覆盖文件。
+- **全新安装 vs 升级安装**：探测有没有 `config.yaml`；没有就清掉 `@appdata` 残留的 `extensions.json` / `providers-state.yaml` / `provider-models.json` / `.env.providers`（否则新装会看到上一环境的假 provider 和旧会话分组），会话历史与日志保留。
+- **反向同步应用中心**：启动和更新后会 `UPDATE app SET status/version`（postgres `appcenter.app`），让应用中心显示的版本号与实际构建一致。官方没有这一层。
+
+### 4. 依赖与运行时
+
+- **Python 版本是个坑**：官方 `pyproject.toml` 写 `requires-python = ">=3.11,<3.15"`，但 0.22+ 的 `[all]` 依赖大量带 `python_version >= '3.14'` 标记——3.11 下这些包**一个都不会装**。飞牛系统自带 `python3` 是 **3.11.2**，所以本项目必须自带 3.14：`uv venv --python 3.14`，解释器落在 `@apphome/uv-python`，venv 落在 `data/venv`。
+- **强制校验**：建完 venv 还会回读 `sys.version_info`，uv 若悄悄回退到系统 3.11 会直接报错中止，不让你装出一个"能装不能用"的环境。
+- **跨文件系统**：`UV_LINK_MODE=copy`（`@appcenter` 与 `@apphome` 常不同挂载点，hardlink 会失败），uv 缓存也放进 `DATA_DIR`。
+- **国内网络适配**：PyPI 走阿里云镜像；uv / CPython / Node 三处下载都有多源重试与兜底。官方默认直连。
+- **uv 软链进 venv**：运行时 `PATH` 只有 `venv/bin`，所以把 uv 软链到 `venv/bin/uv`，让 Agent 在会话里也能用 uv。官方无此需要。
+
+### 5. 数据与配置
+
+- **`HERMES_HOME` 被重定向**：官方默认 `~/.hermes`；本项目 `HOME` 与 `HERMES_HOME` 都指向 `@apphome/hermes-agent/data`，于是 `config.yaml`、`sessions/`、`memories/`、`skills/`、`plugins/`、`state.db` 全在飞牛的数据卷里，卸载时可选保留。
+- **版本戳机制（官方没有）**：官方 0.22 起 `pyproject.toml` 的 version 固定为 `0.0.0`，版本号改由 `install-stamp.json` 提供；本项目分发的是无 `.git` 的源码树，所以构建时生成 `install-stamp.json`，安装时再写 `fpk/config/bootstrap/hermes-version.env`（`HERMES_VERSION=0.22.2`）。缺了它 `hermes --version` 会显示 `unknown`。
+- **配置模板**：`fpk/config/prompts/config.yaml` 是官方配置结构的快照（`agent` / `terminal` / `browser` / `web` 等段），provider 段留空，实际由界面写入。
+- **provider 预设在本项目**：`src/server/provider-config.js` 内置一批国内外厂商的 base_url 与模型清单（OpenAI / DeepSeek / Anthropic / Gemini / Kimi / 智谱 / MiniMax / SiliconFlow / OpenRouter / xAI / 通义千问 / 腾讯 TokenHub / 小米 MiMo / LM Studio …），并支持 `custom-*` 自定义端点的环境变量映射（`CUSTOM_<ID>_API_KEY`）。官方是在 `config.yaml` 里手写 provider。
+
+### 6. 版本与升级
+
+- **四段版本号**：`0.22.2`（官方）+ `.3`（本项目构建号）。原因很实际：飞牛应用中心**同版本号不允许重装**，内容一改就必须递增构建号。
+- **升级路径**：应用中心覆盖安装（数据保留）；或应用内 `/api/app/auto-update` —— 下载新 FPK 后自行解包覆盖 + hot-patch（因为 `appcenter-cli install-fpk` 对已安装应用只回 "is installed"，不执行升级）。
+- **升级时的依赖策略**：`upgrade_callback` 比对版本，决定是否重装依赖；跨 Python 版本会自动重建 venv。
+- **增量更新接口**：`/api/app/update/*` 这条链路尚未走通验证，当前实际可用路径仍是应用中心覆盖安装（见[已知限制](#已知限制)）。
+
+### 7. 功能增量（官方没有的部分）
+
+| 能力 | 位置 | 说明 |
+|---|---|---|
+| 应用管理 API | `monitor.js` 的 `/api/app/*` | `changelog` / `repair` / `auto-update` / `update/check·token·dispatch·run·fpk` / `hot-patch` |
+| 一键修复 | `POST /api/app/repair` | 重启 gateway 与 dashboard，界面白屏/网关掉线时的第一反应 |
+| 渠道扫码接入 | `custom_routes.js` | 微信 / Telegram / WhatsApp 的二维码登录与状态轮询（官方靠手填配置） |
+| 群聊 Rooms | `custom_routes.js` | 多 Agent 协作房间，成员回复走 Hermes 会话流 |
+| 技能市场 | `custom_routes.js` | 本地技能、远程技能、`skillhub.cn` 搜索与一键安装 |
+| 连接器 | `connectors.js` | 腾讯新闻、百度地图等中文生态 MCP 连接器，填 Key 即用 |
+| 专家 / 市场数据 | `experts-data.js` / `market-data.js` | 预置角色与目录数据 |
+| 飞牛 NAS 技能 | `fpk/config/prompts/skills/trim-cli` | `trim-cli` 二进制（linux-x64 / arm64），管理存储、Docker、相册等 |
+| 内网穿透 | `monitor.js` | 可选 Cloudflare Tunnel，自动下载 `cloudflared`（GitHub 加速镜像优先） |
+| WhatsApp 桥接 | `app/server/whatsapp-bridge/` | 随包内置的 Node 桥接进程 |
+| 中文 TTS 音色 | `monitor.js` | 晓晓 / 晓伊 / 云希 / 云健 / 云夏等 Edge 音色 |
+| 汉化 + 移动端适配 | `src/desktop-app-web-shim.js` | 242 条映射、iOS 防缩放、刘海屏安全区 |
+| 应用中心集成 | `fpk/**` | 生命周期脚本、向导、版本号回写、状态同步 |
+
+### 8. 明确不跟随的部分
+
+- **不同步官方非运行时目录**：`apps/native`、`web`、`website`、`docs`、`tests`、`evals`、`assets`、`.github`（见 `scripts/merge-upstream.js` 的 `EXCLUDE_TOP`）。官方桌面壳、官网、测试与评测集不会进包。
+- **不做 Electron 原生能力**：系统托盘、全局快捷键、原生文件对话框、原生自动更新，均以 Web 能力近似替代，行为不完全等价。
+- **不改官方 Python 业务逻辑**：`PORT_OVERRIDES` 目前是空集合——0.20.x 时代的三处手工补丁在 0.21 起已被官方内建且更强，继续保留反而会让新 `chat_ws` 调不到 `_start_backend_heartbeat_refresher`，WS 握手即崩。
+- **不跟随官方 TUI 使用习惯**：主界面是 Web；`hermes` CLI 仍在（`@apphome/hermes-agent/data/venv/bin/hermes`），`fpk/config/resource` 也声明了 `usr-local-linker`（`bin/hermes`）以便命令行直接调用。
+- **不做多用户/多租户**：整个应用是单实例，所有能访问 8650 的人共享同一份数据与同一套 provider Key。
+
+### 9. 这些差异的代价
+
+移植层与上游存在**隐式契约**，官方一改就可能断：
+
+1. 官方前端新增 `hermesDesktop.*` 属性而我们没登记 → **整页白屏**（用 `scripts/check-bridge-contract.js` 兜）。
+2. 官方新增运行时顶层包而白名单没收录 → 网关启动即 `ModuleNotFoundError`（合并脚本会打"未归类顶层条目"告警）。
+3. 官方改依赖的 `python_version` 标记 → 解释器版本要求变化，venv 要重建。
+4. 官方更新不会自动到达，必须人工同步并发版，存在天然滞后。
+5. 任何 Web 化都会损失一点原生体验；任何"自动更新/自动修复"都多了一层可能出错的自研代码。
 
 ## 系统要求
 
