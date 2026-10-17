@@ -45,12 +45,19 @@ function curl(url) {
 
 console.log('═══ 检测上游', UPSTREAM_REPO, '═══');
 
-// ── 获取官方版本（tag 的 pyproject.toml 权威）──────────────────────
-// 2026-09 起官方 main 分支把 pyproject 的 version 固定成 "0.0.0"（开发态），
-// 真实版本只在 Release tag（v2026.9.24 …）里。所以必须先定位最新 tag，
-// 再读该 tag 的 pyproject.toml；main 只在拿不到 tag 时兜底。
+// ── 获取官方版本 ────────────────────────────────────────────────────
+// 注意两个坑（都踩过）：
+//   1) /tags 接口按 tag 名字母序返回，不是时间序。"v0.22.2" < "v2026.9.24"，
+//      取 per_page=1 会拿到旧的日期式 tag，误判"已是最新"。必须用 /releases
+//      （按发布时间倒序）并过滤 prerelease/draft。
+//   2) 官方自 0.22 起把 pyproject 的 version 固定成 "0.0.0"，真实版本在 tag 名
+//      （v0.22.2）或 hermes_cli/__init__.py 的 __version__，main 分支拿不到。
 let LATEST_TAG = '';
 let LATEST_VER = '';
+
+function curlJson(url) {
+  return JSON.parse(curl(url).replace(/^\uFEFF/, ''));
+}
 
 function pyVersionOf(ref) {
   try {
@@ -60,17 +67,32 @@ function pyVersionOf(ref) {
   } catch { return ''; }
 }
 
-// 1) 最新 tag
+function cliVersionOf(ref) {
+  try {
+    const init = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/${ref}/hermes_cli/__init__.py`);
+    const m = init.match(/^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
+    return m ? m[1] : '';
+  } catch { return ''; }
+}
+
+// 1) 最新正式 Release（唯一可靠的时间序来源）
 try {
-  const tags = JSON.parse(curl(`https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=1`));
-  LATEST_TAG = (tags && tags[0] && tags[0].name) || '';
-  if (LATEST_TAG) console.log('官方最新 tag:', LATEST_TAG);
-} catch (e) { console.log('⚠ 获取 tag 失败:', e.message.slice(0, 80)); }
+  const rels = curlJson(`https://api.github.com/repos/${UPSTREAM_REPO}/releases?per_page=20`);
+  const stable = (rels || []).find((r) => r && !r.prerelease && !r.draft && r.tag_name);
+  LATEST_TAG = stable ? stable.tag_name : '';
+  if (LATEST_TAG) console.log('官方最新 Release:', LATEST_TAG, stable.published_at || '');
+} catch (e) { console.log('⚠ 获取 releases 失败:', e.message.slice(0, 80)); }
 
-// 2) tag 内的 pyproject 版本
-if (LATEST_TAG) LATEST_VER = pyVersionOf(LATEST_TAG);
+// 2) tag 名 → 版本（v0.22.2 这种语义版本直接可用）
+if (LATEST_TAG) {
+  const m = LATEST_TAG.match(/^v?([0-9]+\.[0-9]+\.[0-9]+)$/);
+  if (m) LATEST_VER = m[1];
+}
+// 3) 退而求其次：tag 内的 pyproject / hermes_cli.__version__（v2026.9.24 这类日期 tag）
+if (!LATEST_VER && LATEST_TAG) LATEST_VER = pyVersionOf(LATEST_TAG);
+if (!LATEST_VER && LATEST_TAG) LATEST_VER = cliVersionOf(LATEST_TAG);
 
-// 3) 兜底：main 的 pyproject（老行为）
+// 4) 兜底：main 的 pyproject（老行为）
 if (!LATEST_VER) {
   try {
     const py = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/main/pyproject.toml`);
@@ -95,14 +117,15 @@ if (!LATEST_VER) {
 }
 console.log('官方最新版本:', LATEST_VER);
 
-// ── 获取上游 main 最新 commit sha ─────────────────────────────────
+// ── 获取上游 commit sha（优先正式 Release 的 tag，其次 main）────────
 let LATEST_SHA = '';
 try {
-  const info = JSON.parse(curl(`https://api.github.com/repos/${UPSTREAM_REPO}/commits/main`));
+  const ref = encodeURIComponent(LATEST_TAG || 'main');
+  const info = curlJson(`https://api.github.com/repos/${UPSTREAM_REPO}/commits/${ref}`);
   LATEST_SHA = info.sha || '';
 } catch (e) { console.log('⚠ 无法获取 commit sha:', e.message.slice(0, 80)); }
 if (!LATEST_SHA) { console.log('⚠ 无法获取上游 commit，跳过变更检测'); LATEST_SHA = 'unknown'; }
-console.log('上游 main commit:', LATEST_SHA.slice(0, 12));
+console.log('上游 commit:', LATEST_SHA.slice(0, 12), LATEST_TAG ? `(${LATEST_TAG})` : '(main)');
 
 // ── 读取上次同步状态 ──────────────────────────────────────────────
 let PREV_SHA = '';

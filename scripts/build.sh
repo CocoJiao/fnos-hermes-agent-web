@@ -80,6 +80,34 @@ cp -r app/desktop-app "$APP_STAGE/desktop-app"
 cp -r app/hermes-src "$APP_STAGE/hermes-src"
 echo "✓ hermes-src 已带入（本地维护树）"
 
+# 3.1 install-stamp.json —— 官方 0.22 起版本号只认这个文件
+#     （pyproject 固定 0.0.0，且我们分发的是无 .git 的源码树）。
+#     缺了它 `hermes --version` 会显示 unknown，前端「关于」也拿不到版本。
+#     用官方脚本按当前版本重新生成；无 python 时沿用源码树里的副本。
+PYBIN=""
+# 注意：Windows 的 Git Bash 里 python3 常指向 Microsoft Store 占位符（能 command -v 到但执行即失败），
+# 所以必须用 -c "import sys" 真跑一次才算可用；顺序也优先 python 再 python3。
+for _cand in python python3; do
+  if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import sys" >/dev/null 2>&1; then
+    PYBIN="$_cand"; break
+  fi
+done
+STAMP_SCRIPT="$APP_STAGE/hermes-src/scripts/write_install_stamp.py"
+if [ -n "$PYBIN" ] && [ -f "$STAMP_SCRIPT" ]; then
+  UPS_SHA="$(sed -n 's/^PREV_SHA="\(.*\)"/\1/p' .upstream-state 2>/dev/null || true)"
+  if STAMP_OUT="$("$PYBIN" "$STAMP_SCRIPT" \
+      --output "$APP_STAGE/hermes-src/install-stamp.json" \
+      --base-version "$OFFICIAL_VER" --distance 0 \
+      ${UPS_SHA:+--commit "$UPS_SHA"} \
+      --source build --update-mechanism external 2>&1)"; then
+    echo "✓ install-stamp.json 已生成（base=$OFFICIAL_VER）"
+  else
+    echo "⚠ install-stamp.json 生成失败，沿用源码树内的副本：$(echo "$STAMP_OUT" | tail -2 | tr '\n' ' ')"
+  fi
+else
+  echo "○ 无可用 python 或缺少 write_install_stamp.py，沿用源码树内的 install-stamp.json"
+fi
+
 # 4. ui（dashboard 前端，可选）
 if [ -d "app/ui" ]; then
   cp -r app/ui "$APP_STAGE/ui"

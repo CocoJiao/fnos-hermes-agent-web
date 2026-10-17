@@ -35,6 +35,11 @@ const INCLUDE_TOP = new Set([
   'hermes_cli', 'tui_gateway', 'agent', 'gateway', 'providers', 'skills', 'tools',
   'plugins', 'cron', 'acp_adapter', 'locales', 'optional-mcps', 'optional-skills',
   'datagen-config-examples', 'docker', 'nix', 'scripts',
+  // 0.22 新增运行时包（漏同步会直接 ModuleNotFoundError）：
+  //   pm              包管理器 + 版本戳路径（hermes_cli/version_info.py 依赖 pm.paths）
+  //   hermes_platform 平台声明/解析（host + resolver）
+  //   plugin-catalog  插件目录数据（插件市场/声明解析）
+  'pm', 'hermes_platform', 'plugin-catalog',
   'cli.py', 'run_agent.py', 'hermes', 'hermes_bootstrap.py', 'hermes_constants.py',
   'hermes_logging.py', 'hermes_state.py', 'hermes_state_common.py', 'hermes_state_portability.py',
   'hermes_state_schema.py', 'hermes_state_search.py', 'hermes_time.py', 'setup.py',
@@ -135,13 +140,40 @@ for (const rel of upstreamFiles) {
 }
 
 // ── 官方 SHA/版本记录 ──────────────────────────────────────────────
+// 版本来源优先级：git tag（v0.22.2）→ pyproject（0.21.x 时代）→ hermes_cli.__version__。
+// 官方 0.22 起 pyproject 固定 0.0.0，只看 pyproject 会得到错误版本。
 let latestSha = '';
 let latestVer = '';
 try {
   latestSha = execSync(`git -C "${upstreamDir}" rev-parse HEAD`, { encoding: 'utf8' }).trim().slice(0, 12);
-  const py = fs.readFileSync(path.join(upstreamDir, 'pyproject.toml'), 'utf8');
-  const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-  latestVer = m ? m[1] : '';
+  try {
+    const tag = execSync(`git -C "${upstreamDir}" describe --tags --abbrev=0`, { encoding: 'utf8' }).trim();
+    const mt = tag.match(/^v?([0-9]+\.[0-9]+\.[0-9]+)$/);
+    if (mt) latestVer = mt[1];
+  } catch {}
+  if (!latestVer) {
+    const py = fs.readFileSync(path.join(upstreamDir, 'pyproject.toml'), 'utf8');
+    const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
+    if (m && m[1] !== '0.0.0') latestVer = m[1];
+  }
+  if (!latestVer) {
+    const init = fs.readFileSync(path.join(upstreamDir, 'hermes_cli', '__init__.py'), 'utf8');
+    const m = init.match(/^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
+    if (m) latestVer = m[1];
+  }
+} catch {}
+
+// ── 未归类顶层条目 ─────────────────────────────────────────────────
+// 官方新增运行时目录时，白名单不认识 → 静默漏同步 → 网关启动即 ModuleNotFoundError
+//（pm / hermes_platform / plugin-catalog 就是这么漏的）。这里主动提示。
+const unclassified = [];
+try {
+  for (const e of fs.readdirSync(SRC, { withFileTypes: true })) {
+    const top = e.name;
+    if (INCLUDE_TOP.has(top) || EXCLUDE_TOP.has(top)) continue;
+    if (!e.isDirectory() && top.endsWith('.py')) continue; // 根级 .py 自动收录
+    unclassified.push(top + (e.isDirectory() ? '/' : ''));
+  }
 } catch {}
 
 // ── 输出报告 ───────────────────────────────────────────────────────
@@ -151,6 +183,9 @@ console.log(`更新文件: ${report.updated.length}  | 新增文件: ${report.ad
 if (report.updated.length) console.log('  UPDATED:\n   ' + report.updated.slice(0, 30).join('\n   '));
 if (report.added.length) console.log('  ADDED:\n   ' + report.added.slice(0, 20).join('\n   '));
 if (report.kept.length) console.log('  KEPT(移植修改保留):\n   ' + report.kept.join('\n   '));
+if (unclassified.length) {
+  console.log('  ⚠ 未归类顶层条目（白名单/黑名单都没覆盖，请确认是否需要同步）：\n   ' + unclassified.join('\n   '));
+}
 if (!WRITE) console.log('（dry-run：未写入，加 --write 实际应用）');
 
 // ── 更新 .upstream-state ───────────────────────────────────────────
