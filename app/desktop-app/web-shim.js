@@ -398,6 +398,12 @@
     touchBackend: function () { return Promise.resolve({ ok: true }); },
     getAgentRoster: function () { return Promise.resolve([]); },
     getActiveProfile: function () { return Promise.resolve({ profile: CONFIG.profile || null }); },
+    // 0.22+ 新增：本地皮肤缓存。Electron 主进程把它写成 { skin, profile } 对象，
+    // renderer 读法为 (localSkin?.profile ?? "").trim()。
+    // 这里必须显式给 null —— 交给下面的 Proxy 兜底会返回一个函数，
+    // 前端随即执行 (函数).trim() → "TypeError: (e ?? "").trim is not a function"，
+    // 整个 ThemeProvider 崩溃并显示 "Something broke in the interface"。
+    localSkin: null,
 
     // ── 连接配置(web 仅支持当前注入连接) ──
     testConnectionConfig: function (cfg) {

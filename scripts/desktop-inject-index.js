@@ -48,7 +48,7 @@ html = html.replace(
     <style id="hermes-webline-overrides">
       button[data-slot="searchable-select-trigger"] { min-width: 240px; }
     </style>
-    <script src="./web-shim.js?v=54"></script>
+    <script src="./web-shim.js?v=55"></script>
   </head>`
 );
 
