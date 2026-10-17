@@ -43,7 +43,13 @@ mkdir -p "$DIST" "$BUILD_DIR"
 [ -d "app/desktop-app" ] || { echo "✗ 缺少 app/desktop-app" >&2; exit 1; }
 [ -d "app/hermes-src" ]  || { echo "✗ 缺少 app/hermes-src（含本地修复，必须存在）" >&2; exit 1; }
 [ -f "app/hermes-src/hermes_cli/web_dist/index.html" ] || { echo "✗ 缺少 app/hermes-src/hermes_cli/web_dist（dashboard 无 npm 环境必须随包分发构建产物，缺失会导致网关连不上）" >&2; exit 1; }
-[ -f "fpk/venv-bundle.tar.gz" ] || { echo "✗ 缺少 fpk/venv-bundle.tar.gz" >&2; exit 1; }
+# venv-bundle 可选：v0.21.3.1 起的正式包不含内置 venv（安装时用包内 uv 在线 editable 安装，
+# install_callback 已实现多源重试）；有内置 venv 时安装更快，无则不影响可用性。
+if [ -f "fpk/venv-bundle.tar.gz" ]; then
+  echo "✓ 检测到内置 venv（fpk/venv-bundle.tar.gz），安装时将免在线安装"
+else
+  echo "○ 无内置 venv，安装时走在线 uv 安装（与 v0.21.3.1 正式包一致）"
+fi
 [ -d "fpk/cmd" ]         || { echo "✗ 缺少 fpk/cmd" >&2; exit 1; }
 [ -f "fpk/config/bootstrap/hermes-version.env" ] || { echo "✗ 缺少 fpk/config/bootstrap/hermes-version.env" >&2; exit 1; }
 echo "✓ 前置校验通过"
@@ -86,6 +92,22 @@ if [ -d "app/config" ]; then
   cp -r app/config "$APP_STAGE/config"
   echo "✓ config 已带入 app.tgz"
 fi
+# 5.0 版本注入：HERMES_VERSION 必须等于 VERSION 前三段。
+#     否则 install_callback 里 "已装版本 > 目标版本 → SKIP_INSTALL" 会让升级跳过
+#     uv pip install（editable 源码虽即时生效，但新增依赖不会补装 → 运行时 ModuleNotFoundError）。
+HV="$APP_STAGE/config/bootstrap/hermes-version.env"
+if [ -f "$HV" ]; then
+  sed -i "s/^HERMES_VERSION=.*/HERMES_VERSION=${OFFICIAL_VER}/" "$HV"
+  echo "✓ HERMES_VERSION → ${OFFICIAL_VER}"
+else
+  echo "✗ 缺少 config/bootstrap/hermes-version.env，install_callback 会直接失败" >&2
+  exit 1
+fi
+# 骨架里的同名文件同步一份，避免两处漂移
+if [ -f "fpk/config/bootstrap/hermes-version.env" ]; then
+  sed -i "s/^HERMES_VERSION=.*/HERMES_VERSION=${OFFICIAL_VER}/" fpk/config/bootstrap/hermes-version.env
+fi
+
 # 5.1 config/prompts（config.yaml 模板 + skills）——fnOS 只处理外层 config 的
 #     bootstrap/privilege/resource，prompts 必须随 app.tgz 解压
 if [ -d "fpk/config/prompts" ]; then
@@ -110,8 +132,12 @@ echo "── 打包完整 FPK ──"
   mkdir -p "$APP_TGZ_STAGE"
   cp -r "$APP_STAGE"/* "$APP_TGZ_STAGE/" 2>/dev/null || true
   VENV_SRC="fpk/venv-bundle.tar.gz"
-  cp "$VENV_SRC" "$APP_TGZ_STAGE/"
-  echo "✓ 内置 venv 已带入（$(du -sh "$VENV_SRC" | cut -f1)）"
+  if [ -f "$VENV_SRC" ]; then
+    cp "$VENV_SRC" "$APP_TGZ_STAGE/"
+    echo "✓ 内置 venv 已带入（$(du -sh "$VENV_SRC" | cut -f1)）"
+  else
+    echo "○ 跳过内置 venv（包内不含 venv-bundle.tar.gz）"
+  fi
   # 打包 app.tgz
   tar czf "$BUILD_DIR/app.tgz" -C "$APP_TGZ_STAGE" . 2>/dev/null
 

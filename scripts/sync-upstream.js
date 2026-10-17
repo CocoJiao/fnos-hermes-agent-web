@@ -45,21 +45,47 @@ function curl(url) {
 
 console.log('═══ 检测上游', UPSTREAM_REPO, '═══');
 
-// ── 获取官方版本（pyproject.toml 权威）────────────────────────────
+// ── 获取官方版本（tag 的 pyproject.toml 权威）──────────────────────
+// 2026-09 起官方 main 分支把 pyproject 的 version 固定成 "0.0.0"（开发态），
+// 真实版本只在 Release tag（v2026.9.24 …）里。所以必须先定位最新 tag，
+// 再读该 tag 的 pyproject.toml；main 只在拿不到 tag 时兜底。
+let LATEST_TAG = '';
 let LATEST_VER = '';
+
+function pyVersionOf(ref) {
+  try {
+    const py = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/${ref}/pyproject.toml`);
+    const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
+    return m && m[1] !== '0.0.0' ? m[1] : '';
+  } catch { return ''; }
+}
+
+// 1) 最新 tag
 try {
-  const py = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/main/pyproject.toml`);
-  const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-  LATEST_VER = m ? m[1] : '';
-} catch (e) { console.log('⚠ raw.githubusercontent.com 获取失败:', e.message.slice(0, 80)); }
+  const tags = JSON.parse(curl(`https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=1`));
+  LATEST_TAG = (tags && tags[0] && tags[0].name) || '';
+  if (LATEST_TAG) console.log('官方最新 tag:', LATEST_TAG);
+} catch (e) { console.log('⚠ 获取 tag 失败:', e.message.slice(0, 80)); }
+
+// 2) tag 内的 pyproject 版本
+if (LATEST_TAG) LATEST_VER = pyVersionOf(LATEST_TAG);
+
+// 3) 兜底：main 的 pyproject（老行为）
+if (!LATEST_VER) {
+  try {
+    const py = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/main/pyproject.toml`);
+    const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
+    LATEST_VER = m && m[1] !== '0.0.0' ? m[1] : '';
+  } catch (e) { console.log('⚠ raw.githubusercontent.com 获取失败:', e.message.slice(0, 80)); }
+}
 if (!LATEST_VER) {
   // fallback：api.github.com contents API（CI 网络 raw 域名不稳时兜底）
   try {
-    const py2 = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/contents/pyproject.toml?ref=main`);
+    const py2 = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/contents/pyproject.toml?ref=${LATEST_TAG || 'main'}`);
     let content = py2;
     try { content = Buffer.from(JSON.parse(py2).content || "", "base64").toString("utf8"); } catch {}
     const m2 = content.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-    LATEST_VER = m2 ? m2[1] : '';
+    LATEST_VER = m2 && m2[1] !== '0.0.0' ? m2[1] : '';
     if (LATEST_VER) console.log('（经 api.github.com 获取）');
   } catch (e2) { console.log('⚠ api.github.com 兜底也失败:', e2.message.slice(0, 80)); }
 }
