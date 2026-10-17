@@ -40,6 +40,17 @@ export HOME="${DATA_DIR}"
 # uv 缓存目录放到 DATA_DIR 下，确保和 venv 同一文件系统，hardlink 可用
 export UV_CACHE_DIR="${DATA_DIR}/.uv-cache"
 
+# ── Python 版本要求 ───────────────────────────────────────────────────
+# 官方 0.22+ 必须 Python >= 3.14，两个硬原因（v0.22.2.1 实测踩过）：
+#   1) pyproject 里 46 个核心依赖（openai/httpx/pydantic/fastapi/uvicorn/websockets…）
+#      全带 `; python_version >= '3.14'` 标记，3.11 下一个都不会安装；
+#   2) 代码大量依赖 PEP 649 惰性注解求值。3.11 下 `def f() -> tuple[Path, ...]` 会在
+#      定义时求值，遇到未导入的名字立刻 NameError（如 tui_gateway/methods_onboarding.py）。
+# 飞牛系统 python3 是 3.11.2，因此改为由 uv 托管的 CPython 3.14（首次安装自动下载 ~35MB）。
+HERMES_PY_SPEC="3.14"
+export UV_PYTHON_INSTALL_DIR="${DATA_DIR}/uv-python"
+export UV_LINK_MODE="copy"
+
 # PyPI 国内镜像（阿里云）— UV_INDEX_URL 给 uv pip install 用
 export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 export UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -415,12 +426,19 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
         else
             log_msg ">>> 正在创建 Python 虚拟环境 ..."
         fi
-        "$UV" venv --python /usr/bin/python3 "${VENV_DIR}" 2>>"${LOG_FILE}"
+        "$UV" venv --python "${HERMES_PY_SPEC}" "${VENV_DIR}" 2>>"${LOG_FILE}"
         if [ ! -d "${VENV_DIR}/bin" ]; then
-            toast_err "venv 创建失败: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
+            toast_err "venv 创建失败（Python ${HERMES_PY_SPEC} 需联网下载）: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
             exit 1
         fi
-        log_msg "venv created"
+        # 兜底校验：uv 若回退到系统 python（3.11）就在这里拦住，
+        # 否则会在 gateway 启动时炸成 ModuleNotFoundError / NameError，更难排查
+        _PY_MM="$("${VENV_DIR}/bin/python3" -c 'import sys;print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
+        if [ "${_PY_MM:-0}" -lt 314 ]; then
+            toast_err "venv Python 版本过低（$("${VENV_DIR}/bin/python3" -V 2>&1)，需要 ${HERMES_PY_SPEC}+）"
+            exit 1
+        fi
+        log_msg "venv created ($("${VENV_DIR}/bin/python3" -V 2>&1))"
     fi
 
     if [ -f "${HERMES_SRC}/pyproject.toml" ]; then

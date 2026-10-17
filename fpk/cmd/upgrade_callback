@@ -33,6 +33,14 @@ export HOME="${DATA_DIR}"
 # uv 缓存目录放到 DATA_DIR 下，确保和 venv 同一文件系统，hardlink 可用
 export UV_CACHE_DIR="${DATA_DIR}/.uv-cache"
 
+# ── Python 版本要求 ───────────────────────────────────────────────────
+# 官方 0.22+ 必须 Python >= 3.14（46 个核心依赖带 >=3.14 标记 + 代码依赖 PEP 649
+# 惰性注解）。飞牛系统 python3 是 3.11.2，所以 venv 由 uv 托管 CPython 3.14，
+# 并在升级时主动检测旧 venv：3.11 的 venv 必须重建，否则升级后网关起不来。
+HERMES_PY_SPEC="3.14"
+export UV_PYTHON_INSTALL_DIR="${DATA_DIR}/uv-python"
+export UV_LINK_MODE="copy"
+
 export PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/"
 export UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/"
 
@@ -182,20 +190,36 @@ fi
 # 3. 安装/升级 hermes-agent（uv pip install 覆盖装，不删 venv）
 # ---------------------------------------------------------------------------
 
-# 如果 venv 不存在或损坏，先重建
+# 如果 venv 不存在、损坏或 Python 版本低于要求，先重建
+_NEED_VENV_REBUILD=0
 if [ ! -d "${VENV_DIR}/bin" ] || [ ! -x "${VENV_DIR}/bin/python3" ]; then
+    _NEED_VENV_REBUILD=1
+else
+    _PY_MM="$("${VENV_DIR}/bin/python3" -c 'import sys;print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
+    if [ "${_PY_MM:-0}" -lt 314 ]; then
+        log_msg ">>> 现有 venv Python 为 $("${VENV_DIR}/bin/python3" -V 2>&1)，低于要求的 ${HERMES_PY_SPEC}，重建 ..."
+        _NEED_VENV_REBUILD=1
+    fi
+fi
+
+if [ "$_NEED_VENV_REBUILD" = "1" ]; then
     if [ -d "${VENV_DIR}" ]; then
-        log_msg ">>> 旧 venv 不可用，正在重建 ..."
+        log_msg ">>> 重建 Python 虚拟环境 ..."
         rm -rf "${VENV_DIR}" 2>/dev/null || true
     else
         log_msg ">>> 正在创建 Python 虚拟环境 ..."
     fi
-    "$UV" venv --python /usr/bin/python3 "${VENV_DIR}" 2>>"${LOG_FILE}"
+    "$UV" venv --python "${HERMES_PY_SPEC}" "${VENV_DIR}" 2>>"${LOG_FILE}"
     if [ ! -d "${VENV_DIR}/bin" ]; then
-        toast_err "venv 创建失败: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
+        toast_err "venv 创建失败（Python ${HERMES_PY_SPEC} 需联网下载）: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
         exit 1
     fi
-    log_msg "venv created"
+    _PY_MM="$("${VENV_DIR}/bin/python3" -c 'import sys;print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
+    if [ "${_PY_MM:-0}" -lt 314 ]; then
+        toast_err "venv Python 版本过低（$("${VENV_DIR}/bin/python3" -V 2>&1)，需要 ${HERMES_PY_SPEC}+）"
+        exit 1
+    fi
+    log_msg "venv created ($("${VENV_DIR}/bin/python3" -V 2>&1))"
 fi
 
 # 安装/覆盖安装 hermes-agent：优先内置源码 editable 安装，无源码时退回 PyPI wheel
